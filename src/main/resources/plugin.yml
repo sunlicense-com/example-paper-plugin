@@ -1,0 +1,16 @@
+name: MyPlugin
+version: '${version}'
+main: com.example.myplugin.MyPlugin
+api-version: '1.21'
+description: A Paper plugin protected by SunLicense.
+authors: [You]
+website: https://example.com
+commands:
+  myplugin:
+    description: Shows the plugin's license status.
+    usage: /myplugin [status|recheck]
+    permission: myplugin.admin
+permissions:
+  myplugin.admin:
+    description: See and re-check the license.
+    default: op
