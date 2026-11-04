@@ -1,3 +1,7 @@
+/*
+ * MyPlugin by You. Licensed software: each server needs its own license. Terms: https://example.com/terms
+ * Licensing by SunLicense (https://sunlicense.com).
+ */
 package com.example.myplugin;
 
 import java.io.IOException;
@@ -17,10 +21,14 @@ import org.jetbrains.annotations.NotNull;
 import com.example.myplugin.license.LicenseGuard;
 import com.example.myplugin.license.LicenseStatus;
 import com.example.myplugin.license.Messages;
+import com.example.myplugin.license.SealedCore;
+import com.example.myplugin.license.SunLicenseAnalytics;
+import com.example.myplugin.license.SunLicenseProtection;
 
 /**
  * A Paper plugin protected by SunLicense. The license is checked off the main thread at start-up and
- * every {@code recheck-hours}; your features start only once it is valid ({@link #startFeatures()}).
+ * every {@code recheck-hours}; your features ({@code core/CoreFeatures}) start only once it is valid
+ * ({@link #startFeatures()}). Release builds seal the core, so only a valid license can run it.
  */
 public final class MyPlugin extends JavaPlugin {
     /**
@@ -39,9 +47,18 @@ public final class MyPlugin extends JavaPlugin {
     /** How soon to try again after no answer. */
     private static final long RETRY_TICKS = 20L * 60 * 10;
 
+    /** The core's entry class (sealed in release builds). */
+    private static final String CORE = "com.example.myplugin.core.CoreFeatures";
+
+    /** The ownership notice logged at start-up: who makes the plugin and where its terms are. */
+    private static final String AUTHOR = "You";
+    private static final String TERMS = "https://example.com/terms";
+
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean retryScheduled = new AtomicBoolean();
     private LicenseGuard guard;
+    private SunLicenseAnalytics analytics;
+    private Features features;
     private String licenseKey;
     private String serverId;
     private volatile LicenseStatus status;
@@ -49,9 +66,11 @@ public final class MyPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        LicenseGuard.Settings settings;
         try {
-            guard = new LicenseGuard(LicenseGuard.Settings.load(getResource("sunlicense.properties")),
-                    getDataFolder().toPath().resolve("license.lic"));
+            settings = LicenseGuard.Settings.load(getResource("sunlicense.properties"));
+            guard = new LicenseGuard(settings, getDataFolder().toPath().resolve("license.lic"),
+                    SunLicenseProtection.builder().product(getName(), AUTHOR).terms(TERMS));
             serverId = serverId();
         } catch (IOException e) {
             getLogger().severe("Can't start the license check: " + e.getMessage());
@@ -59,6 +78,13 @@ public final class MyPlugin extends JavaPlugin {
             return;
         }
         licenseKey = LicenseGuard.pickKey(BUILT_IN_KEY, getConfig().getString("license-key", ""));
+        guard.protection().license(licenseKey, serverId);
+        getLogger().info(guard.protection().notice());
+        SealedCore.checkEarly(guard.protection(), getClassLoader());   // so the first check reports a modified jar
+        // Anonymous usage statistics for your Analytics tab, every 30 minutes on a background thread (config.yml: analytics).
+        analytics = SunLicenseAnalytics.builder().baseUrl(settings.url()).apiKey(settings.apiKey())
+                .licenseKey(licenseKey).fingerprint(serverId).productVersion(getPluginMeta().getVersion())
+                .enabled(getConfig().getBoolean("analytics", true)).start();
         checkAsync();
         long hours = getConfig().getLong("recheck-hours", 6);
         if (hours > 0) {
@@ -69,6 +95,16 @@ public final class MyPlugin extends JavaPlugin {
 
     private void checkAsync() {
         getServer().getScheduler().runTaskAsynchronously(this, () -> apply(guard.check(licenseKey, serverId)));
+    }
+
+    @Override
+    public void onDisable() {
+        if (features != null) {
+            features.stop();
+        }
+        if (analytics != null) {
+            analytics.close();
+        }
     }
 
     /** Runs on an async thread; anything touching the server goes back to the main thread. */
@@ -110,9 +146,19 @@ public final class MyPlugin extends JavaPlugin {
         });
     }
 
-    /** Your plugin's features: register listeners, commands and tasks here, not in onEnable. */
+    /** Starts the core (core/CoreFeatures). In a release build it needs the unlock from a valid license check. */
     private void startFeatures() {
-        getLogger().info("MyPlugin is running.");
+        try {
+            features = SealedCore.load(guard.protection(), getClassLoader(), CORE, Features.class);
+            features.start(this);
+        } catch (SunLicenseProtection.Locked e) {
+            started.set(false);   // starts with the next valid check
+            getLogger().severe("MyPlugin can't start yet: " + e.getMessage()
+                    + " It starts as soon as SunLicense confirms the license (the confirmation is kept for 7 days).");
+        } catch (Exception e) {
+            getLogger().severe("MyPlugin's core failed to load: " + e);
+            getServer().getPluginManager().disablePlugin(this);
+        }
     }
 
     @Override
